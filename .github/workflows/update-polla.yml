@@ -2,14 +2,13 @@ name: Update Polla from Gmail
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'inbox/latest.xlsx'
-      - 'inbox/email.json'
-      - 'scripts/update_from_email.py'
 
 permissions:
   contents: write
+
+concurrency:
+  group: polla-gmail-update
+  cancel-in-progress: false
 
 jobs:
   update-polla:
@@ -30,6 +29,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas openpyxl python-dateutil
 
+      - name: Validate inbox files
+        run: |
+          test -f inbox/latest.xlsx
+          test -f inbox/email.json
+
       - name: Update data.js from Gmail Excel
         run: python scripts/update_from_email.py
 
@@ -37,7 +41,7 @@ jobs:
         run: |
           git config user.name "polla-automation"
           git config user.email "actions@github.com"
-          git add assets/js/data.js inbox/processed_message_ids.txt inbox/email.json inbox/latest.xlsx inbox/history scripts/update_from_email.py
+          git add assets/js/data.js inbox/processed_message_ids.txt inbox/email.json inbox/latest.xlsx inbox/history || true
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
