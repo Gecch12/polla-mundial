@@ -1,1 +1,1 @@
-Dashboard Polla Mundial 2026 actualizado con el correo de Beto del 29-Jun y página de Información general. Subir todo el contenido a Netlify.
+Polla Mundial 2026 Dashboard V2.6 responsive. Subir el contenido del ZIP a Netlify.

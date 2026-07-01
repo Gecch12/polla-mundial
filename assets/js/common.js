@@ -1,6 +1,6 @@
 
-const D=window.POLLA_DATA;const base=D.base,movers=D.movers,leaders=D.leaders,rompe=D.rompe,summary=D.summary;
-const pages=[['index.html','Home'],['ranking.html','Ranking'],['race.html','Race'],['movements.html','Movimientos'],['golpes.html','Golpes'],['info.html','Información general']];
+const D=window.POLLA_DATA;const base=D.base,movers=D.movers,leaders=D.leaders,rompe=D.rompe,summary=D.summary,email=D.email||{};
+const pages=[['index.html','Home'],['ranking.html','Ranking'],['race.html','Race'],['movements.html','Movimientos'],['golpes.html','Golpes'],['info.html','Información']];
 function nav(active){document.body.insertAdjacentHTML('afterbegin','<div class="topbar">'+pages.map(p=>`<a class="${p[0]==active?'active':''}" href="${p[0]}">${p[1]}</a>`).join('')+'</div>')}
 function fmtDate(d){return new Date(d+'T00:00:00').toLocaleDateString('es-PE',{day:'2-digit',month:'short'})}
 function medal(p){return p===1?'🥇':p===2?'🥈':p===3?'🥉':''}
