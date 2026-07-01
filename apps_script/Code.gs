@@ -1,49 +1,35 @@
 /**
  * Polla Mundial 2026 - Gmail -> GitHub -> Netlify automation
  *
- * USO:
- * 1) Pegar TODO este archivo en Apps Script reemplazando myFunction().
- * 2) Editar CONFIG.githubToken con tu token de GitHub.
- * 3) Ejecutar installTrigger() una vez y aceptar permisos.
- * 4) Ejecutar checkPollaEmail() una vez para test.
- *
- * Qué hace:
- * - Busca cada 10 minutos el correo más reciente con Excel.
- * - Sube inbox/latest.xlsx + inbox/email.json al repo.
- * - Lanza GitHub Action update-polla.yml.
- * - Espera a que GitHub Action termine.
- * - Si termina OK, envía SOLO al remitente un correo: "web actualizada".
- * - No procesa dos veces el mismo correo.
+ * PRODUCCION:
+ * - Busca el ULTIMO correo valido de Beto con Excel.
+ * - Valido si subject contiene POLLA y contiene PUNTAJES o PRUEBA.
+ * - Si el ultimo correo valido ya fue publicado, no hace nada.
+ * - Si es nuevo, sube latest.xlsx + email.json + historial a GitHub.
+ * - Lanza GitHub Action.
+ * - Si el workflow termina OK, marca el messageId como publicado y envia correo a Beto.
  */
 
 const CONFIG = {
-  // Ajustar si el correo real de Beto no aparece con esta búsqueda.
-  // Tip: también puedes usar from:correo@dominio.com si lo quieres exacto.
-  gmailQuery: 'from:betoramost@hotmail.com has:attachment filename:xlsx newer_than:10d subject:polla subject:puntajes -subject:"web actualizada"',
+  gmailQuery: 'from:betoramost@hotmail.com has:attachment filename:xlsx newer_than:10d subject:polla -subject:"web actualizada"',
+
   githubOwner: 'Gecch12',
   githubRepo: 'polla-mundial',
   githubBranch: 'main',
 
-  // PEGA AQUÍ TU TOKEN. No lo compartas por chat.
-  githubToken: 'code',
+  // PEGA AQUI TU TOKEN. No lo compartas por chat.
+  githubToken: 'PEGA_AQUI_TU_TOKEN',
 
   workflowFile: 'update-polla.yml',
+  siteUrl: 'https://fwc26polla-mundial.netlify.app',
   triggerMinutes: 10,
 
-  // Web pública. Se incluye en el correo de confirmación.
-  siteUrl: 'https://fwc26polla-mundial.netlify.app',
-
-  // AUTO_SENDER = envía confirmación solo al remitente del correo procesado.
-  // Si quieres forzarlo, cambia por el correo exacto de Beto, por ejemplo: 'beto@email.com'
-  confirmationTo: 'AUTO_SENDER',
-
-  // Máximo de espera para confirmar que GitHub Action terminó.
-  maxWorkflowWaitSeconds: 300,
-  pollEverySeconds: 15
+  // En produccion dejar true. En pruebas puedes poner false si no quieres enviar correos.
+  sendConfirmationEmail: true
 };
 
 function installTrigger() {
-  deleteExistingTriggers_('checkPollaEmail');
+  deleteTriggers();
   ScriptApp.newTrigger('checkPollaEmail')
     .timeBased()
     .everyMinutes(CONFIG.triggerMinutes)
@@ -51,91 +37,97 @@ function installTrigger() {
   Logger.log('OK: trigger instalado cada ' + CONFIG.triggerMinutes + ' minutos.');
 }
 
-function uninstallTrigger() {
-  deleteExistingTriggers_('checkPollaEmail');
-  Logger.log('OK: trigger eliminado.');
+function deleteTriggers() {
+  ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
+  Logger.log('OK: triggers eliminados.');
 }
 
 function checkPollaEmail() {
   validateConfig_();
 
-  const lock = LockService.getScriptLock();
-  if (!lock.tryLock(30000)) {
-    Logger.log('Otro proceso está corriendo. Se omite esta ejecución.');
+  const latest = findLatestValidEmail_();
+  if (!latest) {
+    Logger.log('Nada nuevo: no se encontro correo valido de Beto con Excel.');
     return;
   }
 
-  try {
-    const item = findLatestUnprocessedEmail_();
-    if (!item) {
-      Logger.log('No hay correos nuevos para procesar.');
-      return;
+  const publishedId = getPublishedMessageId_();
+  if (publishedId && publishedId === latest.msg.getId()) {
+    Logger.log('Nada nuevo: el ultimo correo valido ya esta publicado.');
+    Logger.log('Ultimo publicado: ' + latest.msg.getSubject());
+    return;
+  }
+
+  Logger.log('Procesando: ' + latest.msg.getSubject());
+  Logger.log('Fecha: ' + latest.msg.getDate());
+
+  const timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss');
+  const shortId = latest.msg.getId().slice(-16).replace(/[^a-zA-Z0-9_-]/g, '');
+
+  const emailJson = buildEmailJson_(latest.msg, latest.attachment);
+  const xlsxBytes = latest.attachment.getBytes();
+
+  uploadToGitHub_('inbox/latest.xlsx', xlsxBytes, 'Gmail: update latest Polla Excel');
+  Logger.log('Subido a GitHub: inbox/latest.xlsx');
+
+  uploadToGitHub_('inbox/email.json', JSON.stringify(emailJson, null, 2), 'Gmail: update latest Polla email');
+  Logger.log('Subido a GitHub: inbox/email.json');
+
+  uploadToGitHub_('inbox/history/' + timestamp + '_' + shortId + '.xlsx', xlsxBytes, 'Gmail: archive Polla Excel');
+  Logger.log('Subido a GitHub: inbox/history/' + timestamp + '_' + shortId + '.xlsx');
+
+  uploadToGitHub_('inbox/history/' + timestamp + '_' + shortId + '.json', JSON.stringify(emailJson, null, 2), 'Gmail: archive Polla email');
+  Logger.log('Subido a GitHub: inbox/history/' + timestamp + '_' + shortId + '.json');
+
+  const runId = dispatchWorkflow_();
+  Logger.log('GitHub Action lanzada.');
+
+  const result = waitForWorkflow_(runId, 8 * 60 * 1000);
+  Logger.log('GitHub Action run ' + runId + ': ' + result.status + '/' + result.conclusion);
+
+  if (result.status === 'completed' && result.conclusion === 'success') {
+    setPublishedMessageId_(latest.msg.getId());
+    if (CONFIG.sendConfirmationEmail) {
+      sendConfirmation_(latest.msg, latest.attachment);
     }
-
-    const msg = item.msg;
-    const attachment = item.attachment;
-    const messageId = msg.getId();
-    const now = new Date();
-    const runStartedAt = now.toISOString();
-    const stamp = Utilities.formatDate(now, Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss');
-    const safeMessageId = sanitizePath_(messageId).slice(0, 80);
-
-    const emailPayload = buildEmailPayload_(msg, attachment, stamp);
-
-    Logger.log('Procesando: ' + emailPayload.subject);
-
-    // Archivos latest usados por Python.
-    putGitHubFile_('inbox/latest.xlsx', attachment.getBytes(), 'Gmail: update latest Polla Excel', false);
-    putGitHubFile_('inbox/email.json', JSON.stringify(emailPayload, null, 2), 'Gmail: update latest Polla email', true);
-
-    // Historial para auditoría.
-    putGitHubFile_('inbox/history/' + stamp + '_' + safeMessageId + '.xlsx', attachment.getBytes(), 'Gmail: archive Polla Excel', false);
-    putGitHubFile_('inbox/history/' + stamp + '_' + safeMessageId + '.json', JSON.stringify(emailPayload, null, 2), 'Gmail: archive Polla email', true);
-
-    dispatchWorkflow_();
-    const result = waitForWorkflow_(runStartedAt);
-
-    if (result.success) {
-      markProcessed_(messageId);
-      sendConfirmationEmail_(msg, emailPayload, result);
-      Logger.log('OK: web actualizada y correo de confirmación enviado.');
-    } else {
-      throw new Error('GitHub Action no terminó correctamente: ' + result.message);
-    }
-  } finally {
-    lock.releaseLock();
+    Logger.log('OK: web actualizada y correo de confirmacion enviado.');
+  } else {
+    throw new Error('GitHub Action no termino OK: ' + result.status + '/' + result.conclusion);
   }
 }
 
-function findLatestUnprocessedEmail_() {
-  const processed = getProcessedMap_();
+function findLatestValidEmail_() {
   const threads = GmailApp.search(CONFIG.gmailQuery, 0, 50);
   const candidates = [];
 
   threads.forEach(thread => {
     thread.getMessages().forEach(msg => {
-      const subject = String(msg.getSubject() || '').toLowerCase();
+      const subject = String(msg.getSubject() || '');
+      const subjectLower = normalize_(subject);
       const fromEmail = extractEmail_(msg.getFrom()).toLowerCase();
 
-      if (processed[msg.getId()]) return;
       if (fromEmail !== 'betoramost@hotmail.com') return;
-      if (!subject.includes('polla')) return;
-      if (!subject.includes('puntajes')) return;
-      if (subject.includes('web actualizada')) return;
+      if (subjectLower.includes('web actualizada')) return;
+      if (!subjectLower.includes('polla')) return;
 
-      const atts = msg.getAttachments({
+      const isRealUpdate = subjectLower.includes('puntajes');
+      const isTestUpdate = subjectLower.includes('prueba');
+      if (!isRealUpdate && !isTestUpdate) return;
+
+      const attachments = msg.getAttachments({
         includeInlineImages: false,
         includeAttachments: true
       }).filter(a => /\.xlsx$/i.test(a.getName()));
 
-      if (!atts.length) return;
+      if (!attachments.length) return;
 
-      atts.sort((a, b) => b.getBytes().length - a.getBytes().length);
+      attachments.sort((a, b) => b.getBytes().length - a.getBytes().length);
 
       candidates.push({
         msg: msg,
-        attachment: atts[0],
-        date: msg.getDate()
+        attachment: attachments[0],
+        date: msg.getDate(),
+        subject: subject
       });
     });
   });
@@ -144,13 +136,14 @@ function findLatestUnprocessedEmail_() {
 
   candidates.sort((a, b) => b.date.getTime() - a.date.getTime());
 
-  Logger.log('Último correo válido encontrado: ' + candidates[0].msg.getSubject());
-  Logger.log('Fecha: ' + candidates[0].msg.getDate());
+  Logger.log('Ultimo correo valido encontrado: ' + candidates[0].subject);
+  Logger.log('Fecha: ' + candidates[0].date);
+  Logger.log('Adjunto: ' + candidates[0].attachment.getName());
 
   return candidates[0];
 }
 
-function buildEmailPayload_(msg, attachment, stamp) {
+function buildEmailJson_(msg, attachment) {
   return {
     messageId: msg.getId(),
     threadId: msg.getThread().getId(),
@@ -159,126 +152,94 @@ function buildEmailPayload_(msg, attachment, stamp) {
     fromEmail: extractEmail_(msg.getFrom()),
     to: msg.getTo(),
     cc: msg.getCc(),
-    sent: Utilities.formatDate(msg.getDate(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss'),
-    processedAt: Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss'),
-    attachment: attachment.getName(),
-    archiveStamp: stamp,
-    bodyText: cleanBody_(msg.getPlainBody())
+    date: msg.getDate().toISOString(),
+    bodyPlain: msg.getPlainBody(),
+    bodyHtml: msg.getBody(),
+    attachmentName: attachment.getName(),
+    processedAt: new Date().toISOString(),
+    siteUrl: CONFIG.siteUrl
   };
 }
 
-function sendConfirmationEmail_(originalMsg, emailPayload, workflowResult) {
-  const to = CONFIG.confirmationTo === 'AUTO_SENDER'
-    ? extractEmail_(originalMsg.getFrom())
-    : CONFIG.confirmationTo;
-
-  if (!to) {
-    Logger.log('No se encontró email de confirmación. Se omite envío.');
-    return;
-  }
-
-  const subject = 'web actualizada';
-  const body = [
-    'web actualizada',
-    '',
-    'Archivo procesado: ' + (emailPayload.attachment || ''),
-    'Correo: ' + (emailPayload.subject || ''),
-    'Web: ' + CONFIG.siteUrl,
-    '',
-    'Confirmación automática.'
-  ].join('\n');
-
-  MailApp.sendEmail({
-    to: to,
-    subject: subject,
-    body: body,
-    noReply: true
-  });
-}
-
 function dispatchWorkflow_() {
-  const url = githubApi_('/actions/workflows/' + encodeURIComponent(CONFIG.workflowFile) + '/dispatches');
-  const resp = UrlFetchApp.fetch(url, {
+  const before = listRecentWorkflowRuns_();
+  const beforeIds = {};
+  before.forEach(r => beforeIds[String(r.id)] = true);
+
+  const url = githubApiUrl_('/repos/' + CONFIG.githubOwner + '/' + CONFIG.githubRepo + '/actions/workflows/' + encodeURIComponent(CONFIG.workflowFile) + '/dispatches');
+  const payload = {
+    ref: CONFIG.githubBranch
+  };
+
+  githubFetch_(url, {
     method: 'post',
-    headers: githubHeaders_(),
+    payload: JSON.stringify(payload),
     contentType: 'application/json',
-    payload: JSON.stringify({ref: CONFIG.githubBranch}),
-    muteHttpExceptions: true
+    expectedCodes: [204]
   });
 
-  const code = resp.getResponseCode();
-  if (code < 200 || code >= 300) {
-    throw new Error('No se pudo lanzar GitHub Action: HTTP ' + code + ' - ' + resp.getContentText());
-  }
-  Logger.log('GitHub Action lanzada.');
-}
-
-function waitForWorkflow_(startedAtIso) {
-  const deadline = Date.now() + CONFIG.maxWorkflowWaitSeconds * 1000;
-  let seenRunId = null;
-  let lastStatus = 'esperando creación del run';
-
-  while (Date.now() < deadline) {
-    Utilities.sleep(CONFIG.pollEverySeconds * 1000);
-    const runs = listWorkflowRuns_();
-
-    const run = runs.find(r => {
-      return r.event === 'workflow_dispatch' &&
-        r.head_branch === CONFIG.githubBranch &&
-        new Date(r.created_at).getTime() >= new Date(startedAtIso).getTime() - 60000;
-    });
-
-    if (!run) {
-      Logger.log('Esperando run de GitHub Action...');
-      continue;
-    }
-
-    seenRunId = run.id;
-    lastStatus = run.status + '/' + (run.conclusion || 'sin conclusión');
-    Logger.log('GitHub Action run ' + seenRunId + ': ' + lastStatus);
-
-    if (run.status === 'completed') {
-      if (run.conclusion === 'success') {
-        return {success: true, runId: seenRunId, url: run.html_url, message: 'success'};
+  const start = Date.now();
+  while (Date.now() - start < 60000) {
+    Utilities.sleep(3000);
+    const after = listRecentWorkflowRuns_();
+    for (const run of after) {
+      if (!beforeIds[String(run.id)] && run.name === 'Update Polla from Gmail') {
+        return run.id;
       }
-      return {success: false, runId: seenRunId, url: run.html_url, message: run.conclusion};
+    }
+    if (after.length && after[0].event === 'workflow_dispatch') {
+      return after[0].id;
     }
   }
 
-  return {success: false, runId: seenRunId, url: '', message: 'timeout: ' + lastStatus};
+  throw new Error('No se pudo identificar el GitHub Action run nuevo.');
 }
 
-function listWorkflowRuns_() {
-  const url = githubApi_('/actions/workflows/' + encodeURIComponent(CONFIG.workflowFile) + '/runs?branch=' + encodeURIComponent(CONFIG.githubBranch) + '&per_page=10');
-  const resp = UrlFetchApp.fetch(url, {
-    method: 'get',
-    headers: githubHeaders_(),
-    muteHttpExceptions: true
-  });
-  const code = resp.getResponseCode();
-  if (code < 200 || code >= 300) {
-    throw new Error('No se pudo leer GitHub Actions: HTTP ' + code + ' - ' + resp.getContentText());
+function waitForWorkflow_(runId, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const run = getWorkflowRun_(runId);
+    Logger.log('GitHub Action run ' + runId + ': ' + run.status + '/' + (run.conclusion || 'sin conclusion'));
+    if (run.status === 'completed') {
+      return {
+        status: run.status,
+        conclusion: run.conclusion
+      };
+    }
+    Utilities.sleep(15000);
   }
-  return JSON.parse(resp.getContentText()).workflow_runs || [];
+  throw new Error('Timeout esperando GitHub Action run ' + runId);
 }
 
-function putGitHubFile_(path, content, message, isText) {
-  const url = githubApi_('/contents/' + path.split('/').map(encodeURIComponent).join('/'));
+function listRecentWorkflowRuns_() {
+  const url = githubApiUrl_('/repos/' + CONFIG.githubOwner + '/' + CONFIG.githubRepo + '/actions/workflows/' + encodeURIComponent(CONFIG.workflowFile) + '/runs?branch=' + encodeURIComponent(CONFIG.githubBranch) + '&per_page=10');
+  const res = githubFetch_(url, { method: 'get', expectedCodes: [200] });
+  return JSON.parse(res.getContentText()).workflow_runs || [];
+}
+
+function getWorkflowRun_(runId) {
+  const url = githubApiUrl_('/repos/' + CONFIG.githubOwner + '/' + CONFIG.githubRepo + '/actions/runs/' + runId);
+  const res = githubFetch_(url, { method: 'get', expectedCodes: [200] });
+  return JSON.parse(res.getContentText());
+}
+
+function uploadToGitHub_(path, content, message) {
+  const url = githubApiUrl_('/repos/' + CONFIG.githubOwner + '/' + CONFIG.githubRepo + '/contents/' + encodeURIComponentPath_(path));
   let sha = null;
 
-  const getResp = UrlFetchApp.fetch(url + '?ref=' + encodeURIComponent(CONFIG.githubBranch), {
+  const getRes = UrlFetchApp.fetch(url + '?ref=' + encodeURIComponent(CONFIG.githubBranch), {
     method: 'get',
-    headers: githubHeaders_(),
-    muteHttpExceptions: true
+    muteHttpExceptions: true,
+    headers: githubHeaders_()
   });
 
-  if (getResp.getResponseCode() === 200) {
-    sha = JSON.parse(getResp.getContentText()).sha;
-  } else if (getResp.getResponseCode() !== 404) {
-    throw new Error('No se pudo verificar archivo GitHub ' + path + ': ' + getResp.getContentText());
+  if (getRes.getResponseCode() === 200) {
+    sha = JSON.parse(getRes.getContentText()).sha;
+  } else if (getRes.getResponseCode() !== 404) {
+    throw new Error('Error consultando archivo GitHub ' + path + ': ' + getRes.getResponseCode() + ' ' + getRes.getContentText());
   }
 
-  const bytes = isText ? Utilities.newBlob(String(content), 'text/plain', 'payload.txt').getBytes() : content;
+  const bytes = typeof content === 'string' ? Utilities.newBlob(content, 'text/plain').getBytes() : content;
   const payload = {
     message: message,
     content: Utilities.base64Encode(bytes),
@@ -286,86 +247,118 @@ function putGitHubFile_(path, content, message, isText) {
   };
   if (sha) payload.sha = sha;
 
-  const putResp = UrlFetchApp.fetch(url, {
+  githubFetch_(url, {
     method: 'put',
-    headers: githubHeaders_(),
-    contentType: 'application/json',
     payload: JSON.stringify(payload),
-    muteHttpExceptions: true
+    contentType: 'application/json',
+    expectedCodes: [200, 201]
   });
-
-  const code = putResp.getResponseCode();
-  if (code < 200 || code >= 300) {
-    throw new Error('No se pudo subir ' + path + ': HTTP ' + code + ' - ' + putResp.getContentText());
-  }
-
-  Logger.log('Subido a GitHub: ' + path);
 }
 
-function githubApi_(suffix) {
-  return 'https://api.github.com/repos/' + CONFIG.githubOwner + '/' + CONFIG.githubRepo + suffix;
+function sendConfirmation_(msg, attachment) {
+  const to = extractEmail_(msg.getFrom());
+  const body = [
+    'web actualizada',
+    '',
+    'Archivo procesado: ' + attachment.getName(),
+    'Correo: ' + msg.getSubject(),
+    'Web: ' + CONFIG.siteUrl,
+    '',
+    'Confirmacion automatica.'
+  ].join('\n');
+
+  GmailApp.sendEmail(to, 'web actualizada', body, {
+    replyTo: Session.getActiveUser().getEmail()
+  });
+}
+
+function getPublishedMessageId_() {
+  return PropertiesService.getScriptProperties().getProperty('PUBLISHED_MESSAGE_ID') || '';
+}
+
+function setPublishedMessageId_(messageId) {
+  PropertiesService.getScriptProperties().setProperty('PUBLISHED_MESSAGE_ID', messageId);
+}
+
+function clearPublishedMessageId_FOR_TEST_ONLY() {
+  PropertiesService.getScriptProperties().deleteProperty('PUBLISHED_MESSAGE_ID');
+  Logger.log('Checkpoint eliminado. Usar solo para pruebas.');
+}
+
+function debugLatestValidEmail() {
+  const latest = findLatestValidEmail_();
+  if (!latest) {
+    Logger.log('No se encontro correo valido.');
+    return;
+  }
+  Logger.log('Subject: ' + latest.msg.getSubject());
+  Logger.log('Date: ' + latest.msg.getDate());
+  Logger.log('MessageId: ' + latest.msg.getId());
+  Logger.log('Attachment: ' + latest.attachment.getName());
+  Logger.log('PublishedMessageId: ' + getPublishedMessageId_());
+}
+
+function markLatestAsPublished_FOR_RECOVERY_ONLY() {
+  const latest = findLatestValidEmail_();
+  if (!latest) throw new Error('No hay correo valido para marcar.');
+  setPublishedMessageId_(latest.msg.getId());
+  Logger.log('Marcado como publicado: ' + latest.msg.getSubject());
+}
+
+function validateConfig_() {
+  if (!CONFIG.githubToken || CONFIG.githubToken === 'PEGA_AQUI_TU_TOKEN') {
+    throw new Error('Falta CONFIG.githubToken. Pegalo en Code.gs dentro de Apps Script.');
+  }
+  if (!CONFIG.githubOwner || !CONFIG.githubRepo || !CONFIG.githubBranch) {
+    throw new Error('Faltan datos GitHub en CONFIG.');
+  }
+}
+
+function githubApiUrl_(path) {
+  return 'https://api.github.com' + path;
 }
 
 function githubHeaders_() {
   return {
     Authorization: 'Bearer ' + CONFIG.githubToken,
     Accept: 'application/vnd.github+json',
-    'X-GitHub-Api-Version': '2022-11-28',
-    'User-Agent': 'polla-mundial-apps-script'
+    'X-GitHub-Api-Version': '2022-11-28'
   };
 }
 
-function getProcessedMap_() {
-  return JSON.parse(PropertiesService.getScriptProperties().getProperty('processedMessageIds') || '{}');
-}
+function githubFetch_(url, options) {
+  options = options || {};
+  const expected = options.expectedCodes || [200];
+  const fetchOptions = {
+    method: options.method || 'get',
+    muteHttpExceptions: true,
+    headers: githubHeaders_()
+  };
 
-function markProcessed_(messageId) {
-  const processed = getProcessedMap_();
-  processed[messageId] = new Date().toISOString();
+  if (options.payload !== undefined) fetchOptions.payload = options.payload;
+  if (options.contentType) fetchOptions.contentType = options.contentType;
 
-  // Evita que PropertiesService crezca infinito.
-  const entries = Object.entries(processed)
-    .sort((a, b) => String(b[1]).localeCompare(String(a[1])))
-    .slice(0, 500);
-  PropertiesService.getScriptProperties().setProperty('processedMessageIds', JSON.stringify(Object.fromEntries(entries)));
-}
-
-function cleanBody_(body) {
-  return String(body || '')
-    .replace(/\r\n/g, '\n')
-    .replace(/\n{4,}/g, '\n\n\n')
-    .trim();
+  const res = UrlFetchApp.fetch(url, fetchOptions);
+  const code = res.getResponseCode();
+  if (!expected.includes(code)) {
+    throw new Error('GitHub API error ' + code + ' en ' + url + ': ' + res.getContentText());
+  }
+  return res;
 }
 
 function extractEmail_(fromValue) {
   const s = String(fromValue || '');
-  const angle = s.match(/<([^>]+)>/);
-  if (angle) return angle[1].trim();
-  const plain = s.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  return plain ? plain[0].trim() : '';
+  const m = s.match(/<([^>]+)>/);
+  return (m ? m[1] : s).trim();
 }
 
-function sanitizePath_(s) {
-  return String(s || '').replace(/[^a-zA-Z0-9._-]/g, '_');
+function normalize_(s) {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
 }
 
-function deleteExistingTriggers_(functionName) {
-  ScriptApp.getProjectTriggers().forEach(trigger => {
-    if (trigger.getHandlerFunction() === functionName) ScriptApp.deleteTrigger(trigger);
-  });
-}
-
-function validateConfig_() {
-  if (!CONFIG.githubToken || CONFIG.githubToken === 'PEGA_AQUI_TU_TOKEN') {
-    throw new Error('Falta pegar CONFIG.githubToken.');
-  }
-  if (!CONFIG.githubOwner || !CONFIG.githubRepo) {
-    throw new Error('Falta githubOwner/githubRepo.');
-  }
-}
-
-// Utilidad opcional para resetear pruebas. No usar en producción salvo que quieras reprocesar correos.
-function clearProcessedCache_FOR_TEST_ONLY() {
-  PropertiesService.getScriptProperties().deleteProperty('processedMessageIds');
-  Logger.log('Cache de mensajes procesados eliminada.');
+function encodeURIComponentPath_(path) {
+  return path.split('/').map(encodeURIComponent).join('/');
 }
