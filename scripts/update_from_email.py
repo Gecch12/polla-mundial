@@ -77,19 +77,23 @@ def infer_date(email: Dict[str, Any]) -> str:
 def find_ranking_table(xlsx_path: Path) -> List[Dict[str, Any]]:
     """Extract the official ranking table from Beto's PUNTAJES sheet.
 
-    Debuggable/production-safe version:
-    - prints progress at each stage;
-    - scans only bounded dimensions;
-    - prioritizes the official right-side table: TOTAL | position | participant;
-    - refuses to publish if the leader/participants look wrong.
+    Production/debug version:
+    - opens workbook in read_only mode (important for Beto's Excel);
+    - scans bounded ranges only;
+    - detects the right-side ranking table with several possible layouts:
+        A: TOTAL | POS | NAME
+        B: TOTAL | blank | POS | NAME
+        C: TOTAL | blank | blank | POS | NAME  (layout seen in latest.xlsx)
+    - refuses to publish if validation looks wrong.
     """
     from openpyxl import load_workbook
 
-    log(f"Abriendo Excel: {xlsx_path}")
-    wb = load_workbook(xlsx_path, data_only=True, read_only=False)
+    log(f"Abriendo Excel en read_only: {xlsx_path}")
+    wb = load_workbook(xlsx_path, data_only=True, read_only=True)
     log(f"Excel abierto. Hojas: {', '.join(wb.sheetnames)}")
 
-    preferred = [name for name in wb.sheetnames if 'PUNTAJES' in normalize_name(name)]
+    preferred = [name for name in wb.sheetnames if normalize_name(name) == 'PUNTAJES']
+    preferred += [name for name in wb.sheetnames if 'PUNTAJES' in normalize_name(name) and name not in preferred]
     sheets = preferred + [n for n in wb.sheetnames if n not in preferred]
     log(f"Orden de búsqueda: {', '.join(sheets)}")
 
@@ -102,13 +106,16 @@ def find_ranking_table(xlsx_path: Path) -> List[Dict[str, Any]]:
         bad = [
             'TOTAL', 'PUNTOS', 'PUESTOS', 'PARTICIPANTE', 'CLASIF', 'ETAPA',
             'GRUPO', 'REGLAMENTO', 'FECHA', 'FINAL', 'OCTAVOS', 'DIECISEISAVOS',
-            'PERU', 'MUNDIAL', 'PUESTO', 'LOCAL', 'VISITA', 'GANADOR'
+            'PERU', 'MUNDIAL', 'PUESTO', 'LOCAL', 'VISITA', 'GANADOR', 'PARR'
         ]
         if any(b in name for b in bad):
             return ''
         if not re.search(r'[A-ZÁÉÍÓÚÑ]', name):
             return ''
         if re.search(r'https?://|@', name, re.I):
+            return ''
+        # Avoid names that are mostly numbers/single codes.
+        if len(re.sub(r'[^A-ZÁÉÍÓÚÑ ]', '', name)) < 3:
             return ''
         return name
 
@@ -121,10 +128,34 @@ def find_ranking_table(xlsx_path: Path) -> List[Dict[str, Any]]:
         return grid
 
     def cell(grid: List[List[Any]], r: int, c: int) -> Any:
-        # r/c are 0-based
         if r < 0 or c < 0 or r >= len(grid) or c >= len(grid[r]):
             return None
         return grid[r][c]
+
+    def scan_pattern(grid: List[List[Any]], max_row: int, max_col: int, total_offset: int, pos_offset: int, name_offset: int, label: str, sh_name: str) -> None:
+        # total_offset is always 0, but kept explicit for readability.
+        for total_col in range(max(0, max_col - 90), max_col - max(pos_offset, name_offset) - 1):
+            rows: List[Dict[str, Any]] = []
+            for r in range(max_row):
+                pts = to_number(cell(grid, r, total_col + total_offset))
+                pos = to_number(cell(grid, r, total_col + pos_offset))
+                name = valid_name(cell(grid, r, total_col + name_offset))
+                if pts is None or pos is None or not name:
+                    continue
+                if not (1 <= int(pos) <= 250):
+                    continue
+                if not (120 <= int(pts) <= 1000):
+                    continue
+                rows.append({'Participante': name, 'Puntos': int(round(pts)), 'Posicion': int(round(pos))})
+            if len(rows) >= 50:
+                rows.sort(key=lambda r: (int(r['Posicion']), -int(r['Puntos'])))
+                leader = rows[0]
+                # Prefer sheets literally named PUNTAJES and layouts with the right-side leader.
+                sheet_bonus = 10000 if normalize_name(sh_name) == 'PUNTAJES' else 5000 if 'PUNTAJES' in normalize_name(sh_name) else 0
+                leader_bonus = 5000 if leader['Posicion'] == 1 and leader['Puntos'] >= 150 else 0
+                score = sheet_bonus + leader_bonus + len(rows) * 1000 + int(leader['Puntos'])
+                log(f"Candidato {label} en '{sh_name}' col {total_col+1}: {len(rows)} filas, top={leader['Posicion']}. {leader['Participante']} {leader['Puntos']}, score={score}")
+                all_candidates.append({'score': score, 'rows': rows, 'sheet': sh_name, 'pattern': f'{label} total_col={total_col+1}'})
 
     for sh_name in sheets:
         ws = wb[sh_name]
@@ -139,47 +170,14 @@ def find_ranking_table(xlsx_path: Path) -> List[Dict[str, Any]]:
 
         grid = get_grid(ws, max_row, max_col)
 
-        # Pattern A: official table at the right side: TOTAL | rank | participant.
-        log(f"Buscando patrón oficial TOTAL|POS|NOMBRE en '{sh_name}'")
-        for total_col in range(max(0, max_col - 80), max_col - 2):
-            rows: List[Dict[str, Any]] = []
-            for r in range(max_row):
-                pts = to_number(cell(grid, r, total_col))
-                pos = to_number(cell(grid, r, total_col + 1))
-                name = valid_name(cell(grid, r, total_col + 2))
-                if pts is None or pos is None or not name:
-                    continue
-                if not (1 <= int(pos) <= 250):
-                    continue
-                if not (120 <= int(pts) <= 1000):
-                    continue
-                rows.append({'Participante': name, 'Puntos': int(round(pts)), 'Posicion': int(round(pos))})
-            if len(rows) >= 50:
-                leader = max(r['Puntos'] for r in rows)
-                score = len(rows) * 1000 + leader + (5000 if any(r['Posicion'] == 1 for r in rows) else 0)
-                log(f"Candidato A en '{sh_name}' col {total_col+1}: {len(rows)} filas, leader={leader}")
-                all_candidates.append({'score': score, 'rows': rows, 'sheet': sh_name, 'pattern': f'TOTAL|POS|NOMBRE cols {total_col+1}-{total_col+3}'})
+        log(f"Buscando patrón A TOTAL|POS|NOMBRE en '{sh_name}'")
+        scan_pattern(grid, max_row, max_col, 0, 1, 2, 'A TOTAL|POS|NOMBRE', sh_name)
 
-        # Pattern B: sometimes there is an empty spacer between TOTAL and rank/name.
-        log(f"Buscando patrón alternativo TOTAL|blank|POS|NOMBRE en '{sh_name}'")
-        for total_col in range(max(0, max_col - 80), max_col - 3):
-            rows = []
-            for r in range(max_row):
-                pts = to_number(cell(grid, r, total_col))
-                pos = to_number(cell(grid, r, total_col + 2))
-                name = valid_name(cell(grid, r, total_col + 3))
-                if pts is None or pos is None or not name:
-                    continue
-                if not (1 <= int(pos) <= 250):
-                    continue
-                if not (120 <= int(pts) <= 1000):
-                    continue
-                rows.append({'Participante': name, 'Puntos': int(round(pts)), 'Posicion': int(round(pos))})
-            if len(rows) >= 50:
-                leader = max(r['Puntos'] for r in rows)
-                score = len(rows) * 1000 + leader + (4000 if any(r['Posicion'] == 1 for r in rows) else 0)
-                log(f"Candidato B en '{sh_name}' col {total_col+1}: {len(rows)} filas, leader={leader}")
-                all_candidates.append({'score': score, 'rows': rows, 'sheet': sh_name, 'pattern': f'TOTAL|blank|POS|NOMBRE cols {total_col+1}-{total_col+4}'})
+        log(f"Buscando patrón B TOTAL|blank|POS|NOMBRE en '{sh_name}'")
+        scan_pattern(grid, max_row, max_col, 0, 2, 3, 'B TOTAL|blank|POS|NOMBRE', sh_name)
+
+        log(f"Buscando patrón C TOTAL|blank|blank|POS|NOMBRE en '{sh_name}'")
+        scan_pattern(grid, max_row, max_col, 0, 3, 4, 'C TOTAL|blank|blank|POS|NOMBRE', sh_name)
 
     log(f"Candidatos encontrados: {len(all_candidates)}")
     if not all_candidates:
@@ -203,12 +201,12 @@ def find_ranking_table(xlsx_path: Path) -> List[Dict[str, Any]]:
 
     if len(rows) < 70:
         raise ValueError(f'Validación fallida: solo se extrajeron {len(rows)} participantes. No se publica.')
-    if len(rows) >= 2 and rows[0]['Puntos'] < rows[1]['Puntos']:
-        raise ValueError('Validación fallida: ranking no está ordenado por puntos. No se publica.')
     if rows[0]['Puntos'] < 150:
         raise ValueError(f'Validación fallida: líder con {rows[0]["Puntos"]} puntos parece incorrecto. No se publica.')
     if rows[0]['Participante'] in {'TERCEROS', 'TOTAL', 'PUNTOS'}:
         raise ValueError('Validación fallida: el líder extraído no es un participante real. No se publica.')
+    if rows[0]['Posicion'] != 1:
+        raise ValueError(f'Validación fallida: primer registro no tiene posición 1 ({rows[0]}). No se publica.')
 
     log(f"Ranking oficial OK: {len(rows)} participantes. Líder {rows[0]['Participante']} {rows[0]['Puntos']}.")
     return rows
