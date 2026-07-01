@@ -71,85 +71,132 @@ def infer_date(email: Dict[str, Any]) -> str:
 
 
 def find_ranking_table(xlsx_path: Path) -> List[Dict[str, Any]]:
-    """Best-effort extraction of the current ranking from Beto's Excel.
+    """Extract the official ranking table from Beto's PUNTAJES sheet.
 
-    Handles typical sheets where rows contain: position, participant/name, total points.
-    If the workbook layout changes, this function is the only likely place to adjust.
+    The real ranking is the table at the far right of the sheet, shaped like:
+      TOTAL | <position> | <participant name>
+       237 |      1     | SALVADOR RAMOS
+
+    We avoid generic table detection because the sheet contains many other
+    numeric areas that can look like rankings.
     """
-    xls = pd.ExcelFile(xlsx_path)
-    best = []
-    best_score = -1
+    from openpyxl import load_workbook
 
-    for sheet in xls.sheet_names:
-        raw = pd.read_excel(xlsx_path, sheet_name=sheet, header=None, dtype=object)
-        raw = raw.dropna(how='all').dropna(axis=1, how='all')
-        if raw.empty:
+    wb = load_workbook(xlsx_path, data_only=True, read_only=True)
+    sheet_name = None
+    for name in wb.sheetnames:
+        if 'PUNTAJES' in normalize_name(name):
+            sheet_name = name
+            break
+    if sheet_name is None:
+        # Fallback, but still scan every sheet using the same strict pattern.
+        sheets = wb.sheetnames
+    else:
+        sheets = [sheet_name] + [n for n in wb.sheetnames if n != sheet_name]
+
+    all_candidates: List[Dict[str, Any]] = []
+
+    def cell_num(v: Any) -> Optional[float]:
+        return to_number(v)
+
+    def valid_name(v: Any) -> str:
+        name = normalize_name(v)
+        if len(name) < 3:
+            return ''
+        bad = [
+            'TOTAL', 'PUNTOS', 'PUESTOS', 'PARTICIPANTE', 'CLASIF', 'ETAPA',
+            'GRUPO', 'REGLAMENTO', 'FECHA', 'FINAL', 'OCTAVOS', 'DIECISEISAVOS',
+            'PERU', 'MUNDIAL', 'PUESTO'
+        ]
+        if any(b in name for b in bad):
+            return ''
+        # Names should contain letters; avoid random formulas/URLs.
+        if not re.search(r'[A-ZÁÉÍÓÚÑ]', name):
+            return ''
+        return name
+
+    for sh_name in sheets:
+        ws = wb[sh_name]
+        max_row = ws.max_row or 0
+        max_col = ws.max_column or 0
+        if max_row < 10 or max_col < 5:
             continue
 
-        # Try header-based detection first.
-        for header_i in range(min(25, len(raw))):
-            headers = [normalize_name(v) for v in raw.iloc[header_i].tolist()]
-            name_cols = [i for i,h in enumerate(headers) if any(k in h for k in ['PARTICIPANTE','NOMBRE','JUGADOR'])]
-            point_cols = [i for i,h in enumerate(headers) if any(k in h for k in ['PUNTOS','PUNTAJE','TOTAL'])]
-            pos_cols = [i for i,h in enumerate(headers) if any(k in h for k in ['POS','PUESTO','RANK'])]
-            if name_cols and point_cols:
-                name_col = name_cols[0]
-                point_col = point_cols[-1]
-                pos_col = pos_cols[0] if pos_cols else None
-                rows = []
-                for _, r in raw.iloc[header_i+1:].iterrows():
-                    name = normalize_name(r.iloc[name_col] if name_col < len(r) else '')
-                    pts = to_number(r.iloc[point_col] if point_col < len(r) else None)
-                    if not name or len(name) < 3 or pts is None:
-                        continue
-                    if any(bad in name for bad in ['TOTAL', 'PARTICIPANTE', 'PUNTAJE']):
-                        continue
-                    pos = to_number(r.iloc[pos_col]) if pos_col is not None and pos_col < len(r) else None
-                    rows.append({'Participante': name, 'Puntos': int(pts), 'Posicion': int(pos) if pos else None})
-                if len(rows) > best_score:
-                    best, best_score = rows, len(rows)
+        # Pattern A: TOTAL column, then rank, then participant name.
+        # This matches the official right-side ranking in the workbook.
+        for total_col in range(1, max_col - 1):
+            rows: List[Dict[str, Any]] = []
+            for r in range(1, max_row + 1):
+                pts = cell_num(ws.cell(r, total_col).value)
+                pos = cell_num(ws.cell(r, total_col + 1).value)
+                name = valid_name(ws.cell(r, total_col + 2).value)
+                if pts is None or pos is None or not name:
+                    continue
+                if not (1 <= int(pos) <= 250):
+                    continue
+                if not (120 <= int(pts) <= 1000):
+                    continue
+                rows.append({'Participante': name, 'Puntos': int(round(pts)), 'Posicion': int(round(pos))})
 
-        # Fallback: detect rows with a numeric position, a name-like text cell, and numeric totals.
-        rows = []
-        for _, r in raw.iterrows():
-            vals = r.tolist()
-            texts = [(i, normalize_name(v)) for i,v in enumerate(vals) if isinstance(v, str) and len(normalize_name(v)) >= 3]
-            nums = [(i, to_number(v)) for i,v in enumerate(vals) if to_number(v) is not None]
-            if not texts or not nums:
-                continue
-            # Candidate name: longest text not a label.
-            candidates = [(i,t) for i,t in texts if not any(b in t for b in ['TOTAL','PUNTAJE','PARTICIPANTE','POSICION','FECHA'])]
-            if not candidates:
-                continue
-            name_i, name = max(candidates, key=lambda it: len(it[1]))
-            # Total points usually highest/rightmost numeric after name; position usually first small number before name.
-            after_nums = [(i,n) for i,n in nums if i > name_i]
-            if not after_nums:
-                continue
-            pts = after_nums[-1][1]
-            before_nums = [(i,n) for i,n in nums if i < name_i and 0 < n < 500]
-            pos = before_nums[0][1] if before_nums else None
-            if pts is not None and 0 <= pts < 10000:
-                rows.append({'Participante': name, 'Puntos': int(pts), 'Posicion': int(pos) if pos else None})
-        if len(rows) > best_score:
-            best, best_score = rows, len(rows)
+            if len(rows) >= 50:
+                # Score prefers many rows, high leader score, and a plausible first-position row.
+                leader = max(r['Puntos'] for r in rows)
+                has_pos1 = any(r['Posicion'] == 1 for r in rows)
+                score = len(rows) * 1000 + leader + (5000 if has_pos1 else 0)
+                all_candidates.append({'score': score, 'rows': rows, 'sheet': sh_name, 'pattern': f'{total_col},{total_col+1},{total_col+2}'})
 
-    # De-duplicate by participant, keeping max points.
+        # Pattern B: rank, name, total points in nearby columns. Kept as fallback.
+        for pos_col in range(1, max_col - 1):
+            rows = []
+            for r in range(1, max_row + 1):
+                pos = cell_num(ws.cell(r, pos_col).value)
+                name = valid_name(ws.cell(r, pos_col + 1).value)
+                if pos is None or not name or not (1 <= int(pos) <= 250):
+                    continue
+                # Look up to 4 columns left/right for a plausible total.
+                pts = None
+                for c in list(range(max(1, pos_col - 4), pos_col)) + list(range(pos_col + 2, min(max_col, pos_col + 6) + 1)):
+                    n = cell_num(ws.cell(r, c).value)
+                    if n is not None and 120 <= int(n) <= 1000:
+                        pts = int(round(n))
+                        break
+                if pts is None:
+                    continue
+                rows.append({'Participante': name, 'Puntos': pts, 'Posicion': int(round(pos))})
+            if len(rows) >= 50:
+                leader = max(r['Puntos'] for r in rows)
+                score = len(rows) * 900 + leader + (3000 if any(r['Posicion'] == 1 for r in rows) else 0)
+                all_candidates.append({'score': score, 'rows': rows, 'sheet': sh_name, 'pattern': f'fallback {pos_col}'})
+
+    if not all_candidates:
+        raise ValueError('No pude encontrar la tabla oficial de ranking en la hoja PUNTAJES. No se publica nada.')
+
+    chosen = max(all_candidates, key=lambda x: x['score'])
+    rows = chosen['rows']
+
+    # De-duplicate by participant, keeping the row with the highest points.
     dedup: Dict[str, Dict[str, Any]] = {}
-    for row in best:
+    for row in rows:
         name = row['Participante']
         if name not in dedup or row['Puntos'] > dedup[name]['Puntos']:
             dedup[name] = row
     rows = list(dedup.values())
-    if len(rows) < 20:
-        raise ValueError(f'Could not confidently extract ranking table from Excel. Only found {len(rows)} rows.')
 
-    rows.sort(key=lambda r: (-r['Puntos'], r.get('Posicion') or 9999, r['Participante']))
-    # Normalize positions based on sorted points. Dense ties are intentionally not used because current site uses sequential positions.
-    for i, row in enumerate(rows, 1):
-        row['Posicion'] = i
+    # Sort by official position first when available; tie with points/name.
+    rows.sort(key=lambda r: (int(r.get('Posicion') or 9999), -int(r['Puntos']), r['Participante']))
+
+    # Hard validations to prevent publishing a corrupted parse.
+    if len(rows) < 70:
+        raise ValueError(f'Validación fallida: solo se extrajeron {len(rows)} participantes. No se publica.')
+    if rows[0]['Puntos'] < 150:
+        raise ValueError(f'Validación fallida: líder con {rows[0]["Puntos"]} puntos parece incorrecto. No se publica.')
+    if rows[0]['Participante'] in {'TERCEROS', 'TOTAL', 'PUNTOS'}:
+        raise ValueError('Validación fallida: el líder extraído no es un participante real. No se publica.')
+    if rows[0]['Puntos'] < rows[1]['Puntos']:
+        raise ValueError('Validación fallida: ranking no está ordenado por puntos. No se publica.')
+
+    print(f'Ranking oficial extraído de hoja {chosen["sheet"]}, columnas {chosen["pattern"]}: {len(rows)} participantes. Líder {rows[0]["Participante"]} {rows[0]["Puntos"]}.')
     return rows
-
 
 def compute_new_snapshot(current: Dict[str, Any], latest_rows: List[Dict[str, Any]], date_str: str) -> None:
     base = current.get('base', [])
