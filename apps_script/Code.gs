@@ -19,14 +19,13 @@
 const CONFIG = {
   // Ajustar si el correo real de Beto no aparece con esta búsqueda.
   // Tip: también puedes usar from:correo@dominio.com si lo quieres exacto.
-  gmailQuery: '(beto OR vete OR puntajes OR polla) has:attachment filename:xlsx newer_than:10d',
-
+  gmailQuery: 'from:betoramost@hotmail.com has:attachment filename:xlsx newer_than:10d subject:polla subject:puntajes -subject:"web actualizada"',
   githubOwner: 'Gecch12',
   githubRepo: 'polla-mundial',
   githubBranch: 'main',
 
   // PEGA AQUÍ TU TOKEN. No lo compartas por chat.
-  githubToken: 'PEGA_AQUI_TU_TOKEN',
+  githubToken: 'code',
 
   workflowFile: 'update-polla.yml',
   triggerMinutes: 10,
@@ -110,24 +109,44 @@ function checkPollaEmail() {
 
 function findLatestUnprocessedEmail_() {
   const processed = getProcessedMap_();
-  const threads = GmailApp.search(CONFIG.gmailQuery, 0, 20);
+  const threads = GmailApp.search(CONFIG.gmailQuery, 0, 50);
   const candidates = [];
 
   threads.forEach(thread => {
     thread.getMessages().forEach(msg => {
+      const subject = String(msg.getSubject() || '').toLowerCase();
+      const fromEmail = extractEmail_(msg.getFrom()).toLowerCase();
+
       if (processed[msg.getId()]) return;
-      const atts = msg.getAttachments({includeInlineImages: false, includeAttachments: true})
-        .filter(a => /\.xlsx$/i.test(a.getName()));
+      if (fromEmail !== 'betoramost@hotmail.com') return;
+      if (!subject.includes('polla')) return;
+      if (!subject.includes('puntajes')) return;
+      if (subject.includes('web actualizada')) return;
+
+      const atts = msg.getAttachments({
+        includeInlineImages: false,
+        includeAttachments: true
+      }).filter(a => /\.xlsx$/i.test(a.getName()));
+
       if (!atts.length) return;
 
-      // Si hay varios Excel, toma el más pesado. Normalmente será el archivo real.
       atts.sort((a, b) => b.getBytes().length - a.getBytes().length);
-      candidates.push({msg: msg, attachment: atts[0]});
+
+      candidates.push({
+        msg: msg,
+        attachment: atts[0],
+        date: msg.getDate()
+      });
     });
   });
 
   if (!candidates.length) return null;
-  candidates.sort((a, b) => b.msg.getDate().getTime() - a.msg.getDate().getTime());
+
+  candidates.sort((a, b) => b.date.getTime() - a.date.getTime());
+
+  Logger.log('Último correo válido encontrado: ' + candidates[0].msg.getSubject());
+  Logger.log('Fecha: ' + candidates[0].msg.getDate());
+
   return candidates[0];
 }
 
