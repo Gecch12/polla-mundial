@@ -1,1 +1,1 @@
-Polla Mundial 2026 Dashboard V2.6 responsive. Subir el contenido del ZIP a Netlify.
+Polla Mundial 2026 - actualización manual 01-Jul, sin puntos restantes.
