@@ -1,1 +1,1 @@
-Polla Mundial 2026 - actualización manual 01-Jul corregida, sin puntos restantes.
+Polla Mundial 2026 - actualización manual 02-Jul. Sin puntos restantes / máximos posibles.
