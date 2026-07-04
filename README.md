@@ -5,3 +5,7 @@ Polla Mundial 2026 - actualización manual 03-Jul v45. Ranking y premios corregi
 - Agrega visuales.html como sección oficial.
 - Mantiene ranking v45 con empates/premios.
 - Base: Excel oficial 03-Jul.
+
+
+## v47 - 04 Jul manual
+Actualización manual con Excel oficial de Beto del 04-Jul. Mantiene Visuales live, empates/premios y sin máximo posible.
