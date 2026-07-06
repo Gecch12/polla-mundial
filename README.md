@@ -1,4 +1,4 @@
-Polla Mundial 2026 - actualización manual 03-Jul v45. Ranking y premios corregidos para empates: medalla por puntaje y bolsa dividida entre empatados.
+Polla Mundial 2026 - actualización manual 03-Jul v48 — actualización manual 05-Jul con Visuales live
 
 
 ## v46 - Visuales
@@ -8,4 +8,4 @@ Polla Mundial 2026 - actualización manual 03-Jul v45. Ranking y premios corregi
 
 
 ## v47 - 04 Jul manual
-Actualización manual con Excel oficial de Beto del 04-Jul. Mantiene Visuales live, empates/premios y sin máximo posible.
+Actualización manual con Excel oficial de Beto del 05-Jul. Mantiene Visuales live, empates/premios y sin máximo posible.
