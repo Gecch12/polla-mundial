@@ -249,9 +249,57 @@ details[open] .chev{transform:rotate(90deg);color:var(--gold)}
   .web-only{display:none}
   .mobile-only{display:inline}
 }
+
+.site-nav{
+  position:sticky;
+  top:0;
+  z-index:50;
+  display:flex;
+  gap:10px;
+  flex-wrap:wrap;
+  align-items:center;
+  padding:14px 16px;
+  background:rgba(5,13,24,.94);
+  border-bottom:1px solid rgba(40,72,102,.75);
+  backdrop-filter:blur(10px);
+}
+.site-nav a{
+  color:var(--text);
+  text-decoration:none;
+  padding:9px 13px;
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:999px;
+  background:rgba(255,255,255,.04);
+  font-size:14px;
+  font-weight:800;
+}
+.site-nav a:hover,
+.site-nav a.active{
+  background:var(--gold);
+  color:#071628;
+  border-color:var(--gold);
+}
+@media(max-width:760px){
+  .site-nav{
+    overflow-x:auto;
+    flex-wrap:nowrap;
+    padding:10px;
+    -webkit-overflow-scrolling:touch;
+  }
+  .site-nav a{white-space:nowrap;font-size:13px;padding:8px 11px}
+}
+
 </style>
 </head>
-<body>
+<body data-page="maximos">
+<nav class="site-nav" aria-label="Navegación principal">
+  <a href="index.html">Inicio</a>
+  <a href="ranking.html">Ranking</a>
+  <a href="race.html">Carrera</a>
+  <a href="movements.html">Movimientos</a>
+  <a class="active" href="maximos.html">Máximos</a>
+</nav>
+
 <main class="wrap">
   <section class="hero">
     <div>
