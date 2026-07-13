@@ -1,14 +1,9 @@
-Polla Mundial 2026 - actualización manual 10-Jul v51
+Polla Mundial 2026 - actualización manual 11-Jul v52
 
-Contenido:
-- Dashboard actualizado con Excel oficial de Beto del 10-Jul.
-- Ranking, home, movimientos e info actualizados al 10-Jul.
-- Visuales actualizado al 10-Jul.
-- Máximos posibles actualizado al 10-Jul con Francia 2-0 Marruecos y España 2-1 Bélgica cargados en la llave.
-- Mantiene empates/premios corregidos.
+Contenido listo para subir manualmente al repo/GitHub.
 
-Publicación manual:
-1. Descomprimir este ZIP.
-2. Reemplazar archivos en el repo.
-3. Commit + push a main.
-4. Netlify redeploya automáticamente.
+- Dashboard actualizado con Excel oficial de Beto del 11-Jul.
+- Ranking, home, movimientos e info actualizados al 11-Jul.
+- Visuales actualizado al 11-Jul.
+- Máximos posibles actualizado al 11-Jul con semifinalistas: Francia, España, Inglaterra y Argentina.
+- Mantiene la estructura de la versión anterior.
